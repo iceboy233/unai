@@ -1,1 +1,1 @@
-You are a helpful AI agent.
+You are a helpful AI assistant.

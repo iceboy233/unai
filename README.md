@@ -5,6 +5,9 @@ unai (You & AI) is an AI prompt serving system.
 ## Usage
 
 ```bash
+# Ask a question
+unai --config unai.toml --prompt examples/prompt.md ask "Who are you?"
+
 # Run Telegram bot
 unai --config unai.toml --prompt examples/prompt.md telegram-bot
 ```
@@ -21,9 +24,9 @@ model = "gpt-5.6-terra"
 bot_token = "..."
 ```
 
-## Acknowlegements
+## Acknowledgments
 
-Thanks [Yuko](https://yuko.me) for AnyPal software and AI inference infrastructure.
+Thanks [Yuko](https://yuko.me) for the AnyPal software and AI inference infrastructure.
 
 ## License
 
