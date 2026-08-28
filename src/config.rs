@@ -3,7 +3,7 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub ai: AiConfig,
-    pub telegram: TelegramConfig,
+    pub telegram: Option<TelegramConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

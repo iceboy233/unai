@@ -68,10 +68,12 @@ impl App {
         tx: mpsc::Sender<AssistantMessage>,
         rx: mpsc::Receiver<UserMessage>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let ai_config = &self.config.ai;
+
         ai::run(
-            &self.config.ai.api_base,
-            &self.config.ai.api_key,
-            &self.config.ai.model,
+            &ai_config.api_base,
+            &ai_config.api_key,
+            &ai_config.model,
             &self.prompt,
             tx,
             rx,
@@ -84,6 +86,10 @@ impl App {
         tx: mpsc::Sender<UserMessage>,
         rx: mpsc::Receiver<AssistantMessage>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        telegram::run_bot(&self.config.telegram.bot_token, tx, rx).await
+        let telegram_config = self.config.telegram.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "missing telegram config")
+        })?;
+
+        telegram::run_bot(&telegram_config.bot_token, tx, rx).await
     }
 }
