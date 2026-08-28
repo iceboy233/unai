@@ -1,13 +1,7 @@
-use std::{env, fs, io, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 use bpaf::Bpaf;
-use tokio::sync::mpsc;
-use unai::{
-    ai,
-    config::Config,
-    telegram,
-    types::{AssistantMessage, Content, Platform, SessionId, User, UserMessage},
-};
+use unai::{app::App, config::Config};
 
 #[derive(Clone, Debug, Bpaf)]
 #[bpaf(options, version)]
@@ -47,73 +41,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = options().run();
     let config: Config = toml::from_str(&fs::read_to_string(&options.config)?)?;
     let prompt = fs::read_to_string(&options.prompt)?;
+    let app = App::new(config, prompt);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     match options.command {
-        Command::Ask { message } => runtime.block_on(ask(&config, &prompt, &message)),
-        Command::TelegramBot => runtime.block_on(telegram_bot(&config, &prompt)),
+        Command::Ask { message } => runtime.block_on(app.ask(message)),
+        Command::TelegramBot => runtime.block_on(app.telegram_bot()),
     }
-}
-
-async fn ask(
-    config: &Config,
-    prompt: &str,
-    message: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (user_tx, user_rx) = mpsc::channel(1);
-    let (assistant_tx, assistant_rx) = mpsc::channel(1);
-
-    tokio::select! {
-        result = ai::run(
-            &config.ai.api_base,
-            &config.ai.api_key,
-            &config.ai.model,
-            prompt,
-            assistant_tx,
-            user_rx,
-        ) => result,
-        result = run_ask(message, user_tx, assistant_rx) => result,
-    }
-}
-
-async fn telegram_bot(config: &Config, prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let (user_tx, user_rx) = mpsc::channel(1);
-    let (assistant_tx, assistant_rx) = mpsc::channel(1);
-
-    tokio::select! {
-        result = ai::run(
-            &config.ai.api_base,
-            &config.ai.api_key,
-            &config.ai.model,
-            prompt,
-            assistant_tx,
-            user_rx,
-        ) => result,
-        result = telegram::run(&config.telegram.bot_token, user_tx, assistant_rx) => result,
-    }
-}
-
-async fn run_ask(
-    message: &str,
-    tx: mpsc::Sender<UserMessage>,
-    mut rx: mpsc::Receiver<AssistantMessage>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    tx.send(UserMessage {
-        session: SessionId(Platform::Local, 0),
-        user: User::default(),
-        content: Content::Text(message.to_string()),
-        should_reply: true,
-    })
-    .await?;
-
-    let message = rx
-        .recv()
-        .await
-        .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?;
-    let Content::Text(content) = message.content;
-    println!("{content}");
-
-    Ok(())
 }

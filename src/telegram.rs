@@ -13,7 +13,7 @@ use tokio::{select, sync::mpsc, time::sleep};
 
 use crate::types::{AssistantMessage, Content, Platform, SessionId, User, UserMessage};
 
-pub async fn run(
+pub async fn run_bot(
     bot_token: &str,
     tx: mpsc::Sender<UserMessage>,
     rx: mpsc::Receiver<AssistantMessage>,
