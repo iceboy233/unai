@@ -6,6 +6,8 @@ use std::{
 use anstyle::{AnsiColor, Color, Style};
 use tokio::{
     io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    select,
+    signal::ctrl_c,
     sync::mpsc,
 };
 
@@ -37,10 +39,20 @@ pub async fn run(
         writer.write_all(prompt_you.as_bytes()).await?;
         writer.flush().await?;
 
-        let Some(message) = lines.next_line().await? else {
-            writer.write_all(b"\n").await?;
-            writer.flush().await?;
-            return Ok(());
+        let message = select! {
+            line = lines.next_line() => {
+                let Some(message) = line? else {
+                    writer.write_all(b"\n").await?;
+                    writer.flush().await?;
+                    return Ok(());
+                };
+                message
+            }
+            signal = ctrl_c() => {
+                signal?;
+                writer.write_all(b"\n").await?;
+                continue;
+            }
         };
 
         tx.send(UserMessage {

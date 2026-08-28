@@ -8,7 +8,7 @@ unai (You & AI) is an AI prompt serving system.
 # Ask a question
 unai --config unai.toml --prompt examples/prompt.md ask "Who are you?"
 
-# Run interactive chat
+# Start an interactive chat
 unai --config unai.toml --prompt examples/prompt.md chat
 
 # Run Telegram bot

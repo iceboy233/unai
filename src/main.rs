@@ -28,7 +28,7 @@ enum Command {
         message: String,
     },
 
-    /// Run interactive chat
+    /// Start an interactive chat
     #[bpaf(command("chat"))]
     Chat,
 
@@ -39,7 +39,7 @@ enum Command {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     simple_logger::SimpleLogger::new()
-        .with_level(log::LevelFilter::Debug)
+        .with_level(log::LevelFilter::Info)
         .env()
         .init()?;
     let options = options().run();
