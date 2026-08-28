@@ -162,7 +162,7 @@ fn is_reply_to_bot(message: &frankenstein::types::Message, bot_user_id: u64) -> 
         .reply_to_message
         .as_ref()
         .and_then(|reply| reply.from.as_ref())
-        .map_or(false, |from_user| from_user.id == bot_user_id)
+        .is_some_and(|from_user| from_user.id == bot_user_id)
 }
 
 fn is_bot_mentioned(message: &frankenstein::types::Message, bot_username: &str) -> bool {

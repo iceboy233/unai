@@ -28,6 +28,10 @@ enum Command {
         message: String,
     },
 
+    /// Run interactive chat
+    #[bpaf(command("chat"))]
+    Chat,
+
     /// Run Telegram bot
     #[bpaf(command("telegram-bot"))]
     TelegramBot,
@@ -48,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     match options.command {
         Command::Ask { message } => runtime.block_on(app.ask(message)),
+        Command::Chat => runtime.block_on(app.chat()),
         Command::TelegramBot => runtime.block_on(app.telegram_bot()),
     }
 }

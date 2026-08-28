@@ -6,6 +6,7 @@ name = "unai"
 edition = "2021"
 
 [dependencies]
+anstyle = "1"
 async-openai = { version = "0.41", features = ["chat-completion"] }
 bpaf = { version = "0.9", features = ["bpaf_derive"] }
 frankenstein = { version = "0.50", features = ["client-reqwest"] }
@@ -14,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_fmt = "1"
 simple_logger = "5"
 telegram-markdown-v2 = "0.2"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["io-std", "macros", "rt"] }
 toml = { version = "1" }
 
 [profile.release]

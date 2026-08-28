@@ -1,9 +1,9 @@
 use std::io;
 
-use tokio::sync::mpsc;
+use tokio::{select, sync::mpsc};
 
 use crate::{
-    ai,
+    ai, chat,
     config::Config,
     telegram,
     types::{AssistantMessage, Content, Platform, SessionId, User, UserMessage},
@@ -23,9 +23,19 @@ impl App {
         let (user_tx, user_rx) = mpsc::channel(1);
         let (assistant_tx, assistant_rx) = mpsc::channel(1);
 
-        tokio::select! {
+        select! {
             result = self.run_ai(assistant_tx, user_rx) => result,
             result = self.run_ask(message, user_tx, assistant_rx) => result,
+        }
+    }
+
+    pub async fn chat(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let (user_tx, user_rx) = mpsc::channel(1);
+        let (assistant_tx, assistant_rx) = mpsc::channel(1);
+
+        select! {
+            result = self.run_ai(assistant_tx, user_rx) => result,
+            result = chat::run(user_tx, assistant_rx) => result,
         }
     }
 
@@ -33,7 +43,7 @@ impl App {
         let (user_tx, user_rx) = mpsc::channel(1);
         let (assistant_tx, assistant_rx) = mpsc::channel(1);
 
-        tokio::select! {
+        select! {
             result = self.run_ai(assistant_tx, user_rx) => result,
             result = self.run_telegram_bot(user_tx, assistant_rx) => result,
         }
