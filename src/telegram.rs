@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use frankenstein::{
     client_reqwest::Bot,
-    methods::{GetUpdatesParams, SendMessageParams},
-    types::{ChatType, MessageEntityType},
+    methods::{GetUpdatesParams, SendChatActionParams, SendMessageParams},
+    types::{ChatAction, ChatType, MessageEntityType},
     updates::UpdateContent,
     AsyncTelegramApi, ParseMode,
 };
@@ -84,7 +84,14 @@ async fn recv(
                     continue;
                 }
             };
+            let chat_id = user_message.session.1;
+            let should_reply = user_message.should_reply;
             tx.send(user_message).await?;
+            if should_reply {
+                if let Err(e) = send_typing(&bot, chat_id).await {
+                    warn!("Send typing failed: {e:?}");
+                }
+            }
         }
     }
 }
@@ -100,14 +107,18 @@ async fn send(
             continue;
         }
         match assistant_message.content {
-            Content::Text(text) => send_text(&bot, session.1, &text).await,
+            Content::Text(text) => {
+                if let Err(e) = send_text(&bot, session.1, &text).await {
+                    warn!("Send text failed: {e:?}");
+                }
+            }
         };
     }
     Ok(())
 }
 
-async fn send_text(bot: &Bot, chat_id: i64, text: &str) {
-    let params = match telegram_markdown_v2::convert(&text) {
+async fn send_text(bot: &Bot, chat_id: i64, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let params = match telegram_markdown_v2::convert(text) {
         Ok(markdown) => SendMessageParams::builder()
             .chat_id(chat_id)
             .text(markdown)
@@ -121,9 +132,20 @@ async fn send_text(bot: &Bot, chat_id: i64, text: &str) {
                 .build()
         }
     };
-    if let Err(e) = bot.send_message(&params).await {
-        warn!("Send message failed: {e:?}");
-    }
+
+    bot.send_message(&params).await?;
+    Ok(())
+}
+
+async fn send_typing(bot: &Bot, chat_id: i64) -> Result<(), Box<dyn std::error::Error>> {
+    bot.send_chat_action(
+        &SendChatActionParams::builder()
+            .chat_id(chat_id)
+            .action(ChatAction::Typing)
+            .build(),
+    )
+    .await?;
+    Ok(())
 }
 
 fn get_user(message: &frankenstein::types::Message) -> User {

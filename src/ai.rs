@@ -51,7 +51,7 @@ pub async fn run(
                     Message::Assistant(assistant_message),
                 ]);
             }
-            Err(e) => warn!("Failed to handle user message: {e:?}"),
+            Err(e) => warn!("Handle user message failed: {e:?}"),
         }
     }
     Ok(())
