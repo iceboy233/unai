@@ -51,7 +51,7 @@ async fn recv(
             match bot.get_updates(&params).await {
                 Ok(response) => break response.result,
                 Err(e) => {
-                    warn!("Failed to get updates: {e:?}, retry after 2 seconds");
+                    warn!("Get updates failed: {e:?}, retry after 2 seconds");
                     sleep(Duration::from_secs(2)).await;
                 }
             }
@@ -94,31 +94,36 @@ async fn send(
     mut rx: mpsc::Receiver<AssistantMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     while let Some(assistant_message) = rx.recv().await {
-        if assistant_message.session.0 != Platform::Telegram {
-            error!(
-                "Received mismatched platform: {:?}",
-                assistant_message.session.0
-            );
+        let session = assistant_message.session;
+        if session.0 != Platform::Telegram {
+            error!("Received mismatched platform: {:?}", session.0);
             continue;
         }
         match assistant_message.content {
-            Content::Text(text) => {
-                if let Err(e) = bot
-                    .send_message(
-                        &SendMessageParams::builder()
-                            .chat_id(assistant_message.session.1)
-                            .text(telegram_markdown_v2::convert(&text)?)
-                            .parse_mode(ParseMode::MarkdownV2)
-                            .build(),
-                    )
-                    .await
-                {
-                    warn!("Failed to send message: {e:?}");
-                }
-            }
-        }
+            Content::Text(text) => send_text(&bot, session.1, &text).await,
+        };
     }
     Ok(())
+}
+
+async fn send_text(bot: &Bot, chat_id: i64, text: &str) {
+    let params = match telegram_markdown_v2::convert(&text) {
+        Ok(markdown) => SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text(markdown)
+            .parse_mode(ParseMode::MarkdownV2)
+            .build(),
+        Err(e) => {
+            warn!("Markdown conversion failed: {e:?}");
+            SendMessageParams::builder()
+                .chat_id(chat_id)
+                .text(text)
+                .build()
+        }
+    };
+    if let Err(e) = bot.send_message(&params).await {
+        warn!("Send message failed: {e:?}");
+    }
 }
 
 fn get_user(message: &frankenstein::types::Message) -> User {
