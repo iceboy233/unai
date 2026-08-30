@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{hash_map, HashMap, VecDeque},
+    future::pending,
     time::Duration,
 };
 
@@ -27,11 +28,6 @@ pub struct TelegramBot {
     bot_username: String,
 }
 
-enum TypingEvent {
-    Start(i64),
-    Stop(i64),
-}
-
 impl TelegramBot {
     pub async fn connect(bot_token: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let bot = Bot::new(bot_token);
@@ -56,26 +52,22 @@ impl TelegramBot {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (typing_tx, typing_rx) = mpsc::channel(1);
         select! {
-            result = self.recv(tx, typing_tx.clone()) => result,
-            result = self.send(rx, typing_tx) => result,
-            result = self.send_typing(typing_rx) => result,
+            result = self.recv(tx, typing_tx) => result,
+            result = self.send(rx, typing_rx) => result,
         }
     }
 
     async fn recv(
         &self,
-        tx: mpsc::Sender<UserMessage>,
-        typing_tx: mpsc::Sender<TypingEvent>,
+        user_tx: mpsc::Sender<UserMessage>,
+        typing_tx: mpsc::Sender<i64>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut next_offset = None;
         loop {
-            let params = match next_offset {
-                Some(offset) => GetUpdatesParams::builder()
-                    .offset(offset)
-                    .timeout(30)
-                    .build(),
-                None => GetUpdatesParams::builder().timeout(30).build(),
-            };
+            let params = GetUpdatesParams::builder()
+                .maybe_offset(next_offset)
+                .timeout(30)
+                .build();
             let updates = loop {
                 match self.bot.get_updates(&params).await {
                     Ok(response) => break response.result,
@@ -88,7 +80,7 @@ impl TelegramBot {
 
             for update in updates {
                 next_offset = Some(update.update_id as i64 + 1);
-                let user_message = match update.content {
+                let message = match update.content {
                     UpdateContent::Message(message) => {
                         let Some(text) = &message.text else {
                             warn!("Unsupported message: {:?}", to_debug(message.as_ref()));
@@ -113,94 +105,83 @@ impl TelegramBot {
                         continue;
                     }
                 };
-                if user_message.should_reply {
-                    let chat_id = user_message.session.1;
-                    typing_tx.send(TypingEvent::Start(chat_id)).await?;
+                if message.should_reply {
+                    typing_tx.send(message.session.1).await?;
                 }
-                tx.send(user_message).await?;
+                user_tx.send(message).await?;
             }
         }
     }
 
     async fn send(
         &self,
-        mut rx: mpsc::Receiver<AssistantMessage>,
-        typing_tx: mpsc::Sender<TypingEvent>,
+        mut assistant_rx: mpsc::Receiver<AssistantMessage>,
+        mut typing_rx: mpsc::Receiver<i64>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        while let Some(assistant_message) = rx.recv().await {
-            let session = assistant_message.session;
-            if session.0 != Platform::Telegram {
-                error!("Received mismatched platform: {:?}", session.0);
-                continue;
-            }
-            typing_tx.send(TypingEvent::Stop(session.1)).await?;
-            match assistant_message.content {
-                Content::Text(text) => {
-                    if let Err(e) = self.send_text(session.1, &text).await {
-                        warn!("Send text failed: {e:?}");
-                    }
-                }
-            };
-        }
-        Ok(())
-    }
-
-    async fn send_typing(
-        &self,
-        mut rx: mpsc::Receiver<TypingEvent>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut queue: VecDeque<(i64, Instant)> = VecDeque::new();
-        let mut stopped: HashSet<i64> = HashSet::new();
+        let mut typing_count: HashMap<i64, usize> = HashMap::new();
+        let mut typing_queue: VecDeque<(i64, Instant)> = VecDeque::new();
 
         loop {
-            let event = match queue.front().copied() {
-                Some((_, deadline)) => {
-                    select! {
-                        event = rx.recv() => event,
-                        _ = sleep_until(deadline) => {
-                            self.drain_typing_events(&mut queue, &mut stopped).await?;
-                            continue;
+            select! {
+                message = assistant_rx.recv() => {
+                    match message {
+                        Some(message) => {
+                            let session = message.session;
+                            if session.0 != Platform::Telegram {
+                                error!("Received mismatched platform: {:?}", session.0);
+                                continue;
+                            }
+                            match message.content {
+                                Content::Text(text) => {
+                                    if let Err(e) = self.send_text(session.1, &text).await {
+                                        warn!("Send text failed: {e:?}");
+                                    }
+                                }
+                            }
+                            if let hash_map::Entry::Occupied(mut entry) = typing_count.entry(session.1) {
+                                *entry.get_mut() -= 1;
+                                if *entry.get() == 0 {
+                                    entry.remove();
+                                }
+                            }
                         }
+                        None => return Ok(()),
                     }
                 }
-                None => rx.recv().await,
-            };
-
-            match event {
-                Some(TypingEvent::Start(chat_id)) => queue.push_back((chat_id, Instant::now())),
-                Some(TypingEvent::Stop(chat_id)) => {
-                    stopped.insert(chat_id);
+                chat_id = typing_rx.recv() => {
+                    match chat_id {
+                        Some(chat_id) => {
+                            let count = typing_count.entry(chat_id).or_default();
+                            *count += 1;
+                            if *count == 1 {
+                                typing_queue.push_front((chat_id, Instant::now()));
+                            }
+                        }
+                        None => return Ok(()),
+                    }
                 }
-                None => return Ok(()),
+                _ = sleep_until_or_pending(typing_queue.front().map(|(_, deadline)| deadline).copied()) => {
+                    while let Some((chat_id, deadline)) = typing_queue.front().copied() {
+                        let now = Instant::now();
+                        if deadline > now {
+                            break;
+                        }
+                        typing_queue.pop_front();
+                        if !typing_count.contains_key(&chat_id) {
+                            continue;
+                        }
+                        let params = SendChatActionParams::builder()
+                            .chat_id(chat_id)
+                            .action(ChatAction::Typing)
+                            .build();
+                        if let Err(e) = self.bot.send_chat_action(&params).await {
+                            warn!("Send typing failed: {e:?}");
+                        }
+                        typing_queue.push_back((chat_id, now + Duration::from_secs(4)));
+                    }
+                }
             }
         }
-    }
-
-    async fn drain_typing_events(
-        &self,
-        queue: &mut VecDeque<(i64, Instant)>,
-        stopped: &mut HashSet<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        while let Some((chat_id, event_deadline)) = queue.front().copied() {
-            let now = Instant::now();
-            if event_deadline > now {
-                break;
-            }
-            queue.pop_front();
-            if stopped.remove(&chat_id) {
-                continue;
-            }
-            self.bot
-                .send_chat_action(
-                    &SendChatActionParams::builder()
-                        .chat_id(chat_id)
-                        .action(ChatAction::Typing)
-                        .build(),
-                )
-                .await?;
-            queue.push_back((chat_id, now + Duration::from_secs(4)));
-        }
-        Ok(())
     }
 
     async fn send_text(&self, chat_id: i64, text: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -303,5 +284,12 @@ fn ascii_to_lowercase(value: u16) -> u16 {
         value + (b'a' - b'A') as u16
     } else {
         value
+    }
+}
+
+async fn sleep_until_or_pending(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => sleep_until(deadline).await,
+        None => pending().await,
     }
 }
