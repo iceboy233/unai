@@ -3,7 +3,7 @@ use std::io;
 use tokio::{select, sync::mpsc};
 
 use crate::{
-    ai,
+    ai::Assistant,
     chat::Chat,
     config::Config,
     telegram::TelegramBot,
@@ -81,15 +81,13 @@ impl App {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let ai_config = &self.config.ai;
 
-        ai::run(
+        let assistant = Assistant::new(
             &ai_config.api_base,
             &ai_config.api_key,
             &ai_config.model,
             &self.prompt,
-            tx,
-            rx,
-        )
-        .await
+        );
+        assistant.run(tx, rx).await
     }
 
     async fn run_telegram_bot(

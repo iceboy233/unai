@@ -15,104 +15,116 @@ use tokio::sync::mpsc;
 
 use crate::types::{AssistantMessage, Content, UserMessage};
 
+pub struct Assistant {
+    client: Client<OpenAIConfig>,
+    model: String,
+    prompt: String,
+}
+
 #[derive(Clone, Debug)]
 enum Message {
     Assistant(AssistantMessage),
     User(UserMessage),
 }
 
-pub async fn run(
-    api_base: &str,
-    api_key: &str,
-    model: &str,
-    prompt: &str,
-    tx: mpsc::Sender<AssistantMessage>,
-    mut rx: mpsc::Receiver<UserMessage>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let config = OpenAIConfig::new()
-        .with_api_base(api_base)
-        .with_api_key(api_key);
-    let client = Client::with_config(config);
+impl Assistant {
+    pub fn new(api_base: &str, api_key: &str, model: &str, prompt: &str) -> Self {
+        let config = OpenAIConfig::new()
+            .with_api_base(api_base)
+            .with_api_key(api_key);
+        let client = Client::with_config(config);
 
-    // TODO: Use persistent storage
-    let mut sessions = HashMap::new();
-
-    while let Some(user_message) = rx.recv().await {
-        let messages: &mut Vec<Message> = sessions.entry(user_message.session.clone()).or_default();
-        if !user_message.should_reply {
-            messages.push(Message::User(user_message));
-            continue;
+        Self {
+            client,
+            model: model.into(),
+            prompt: prompt.into(),
         }
-        match handle_user_message(&client, model, prompt, messages, &user_message).await {
-            Ok(assistant_message) => {
-                tx.send(assistant_message.clone()).await?;
-                messages.extend([
-                    Message::User(user_message),
-                    Message::Assistant(assistant_message),
-                ]);
+    }
+
+    pub async fn run(
+        &self,
+        tx: mpsc::Sender<AssistantMessage>,
+        mut rx: mpsc::Receiver<UserMessage>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // TODO: Use persistent storage
+        let mut sessions = HashMap::new();
+
+        while let Some(user_message) = rx.recv().await {
+            let messages: &mut Vec<Message> =
+                sessions.entry(user_message.session.clone()).or_default();
+            if !user_message.should_reply {
+                messages.push(Message::User(user_message));
+                continue;
             }
-            Err(e) => warn!("Handle user message failed: {e:?}"),
+            match self.handle_user_message(messages, &user_message).await {
+                Ok(assistant_message) => {
+                    tx.send(assistant_message.clone()).await?;
+                    messages.extend([
+                        Message::User(user_message),
+                        Message::Assistant(assistant_message),
+                    ]);
+                }
+                Err(e) => warn!("Handle user message failed: {e:?}"),
+            }
         }
+        Ok(())
     }
-    Ok(())
-}
 
-async fn handle_user_message(
-    client: &Client<OpenAIConfig>,
-    model: &str,
-    prompt: &str,
-    history: &[Message],
-    user_message: &UserMessage,
-) -> Result<AssistantMessage, Box<dyn std::error::Error>> {
-    // TODO: Log input messages and token count
-    debug!(
-        "Input: [{} {} ({})] {:?}",
-        user_message.user.first_name,
-        user_message.user.last_name,
-        user_message.user.username,
-        user_message.content
-    );
-    let request = to_chat_request(model, prompt, history, user_message)?;
-    let response = client.chat().create(request).await?;
-    match &response.usage {
-        Some(usage) => info!("Usage: {:?}", to_debug(usage)),
-        None => warn!("Response missing usage data."),
+    async fn handle_user_message(
+        &self,
+        history: &[Message],
+        user_message: &UserMessage,
+    ) -> Result<AssistantMessage, Box<dyn std::error::Error>> {
+        // TODO: Log input messages and token count
+        debug!(
+            "Input: [{} {} ({})] {:?}",
+            user_message.user.first_name,
+            user_message.user.last_name,
+            user_message.user.username,
+            user_message.content
+        );
+        let request = self.to_chat_request(history, user_message)?;
+        let response = self.client.chat().create(request).await?;
+        match &response.usage {
+            Some(usage) => info!("Usage: {:?}", to_debug(usage)),
+            None => warn!("Response missing usage data."),
+        }
+        let choice = response.choices.first().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chat completion returned empty choices",
+            )
+        })?;
+        let content = choice.message.content.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "chat completion returned empty content",
+            )
+        })?;
+        debug!("Output: {}", content);
+        let assistant_message = AssistantMessage {
+            session: user_message.session.clone(),
+            content: Content::Text(content.clone()),
+        };
+        Ok(assistant_message)
     }
-    let choice = response.choices.first().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "chat completion returned empty choices",
-        )
-    })?;
-    let content = choice.message.content.as_ref().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "chat completion returned empty content",
-        )
-    })?;
-    debug!("Output: {}", content);
-    let assistant_message = AssistantMessage {
-        session: user_message.session.clone(),
-        content: Content::Text(content.clone()),
-    };
-    Ok(assistant_message)
-}
 
-fn to_chat_request(
-    model: &str,
-    prompt: &str,
-    history: &[Message],
-    user_message: &UserMessage,
-) -> Result<CreateChatCompletionRequest, Box<dyn std::error::Error>> {
-    let request_messages: Vec<ChatCompletionRequestMessage> = once(convert_prompt(prompt))
-        .chain(history.iter().map(convert_message))
-        .chain(once(convert_user_message(user_message)))
-        .collect::<Result<_, _>>()?;
-    let request = CreateChatCompletionRequestArgs::default()
-        .model(model)
-        .messages(request_messages)
-        .build()?;
-    Ok(request)
+    fn to_chat_request(
+        &self,
+        history: &[Message],
+        user_message: &UserMessage,
+    ) -> Result<CreateChatCompletionRequest, Box<dyn std::error::Error>> {
+        let request_messages: Vec<ChatCompletionRequestMessage> =
+            once(convert_prompt(&self.prompt))
+                .chain(history.iter().map(convert_message))
+                .chain(once(convert_user_message(user_message)))
+                .collect::<Result<_, _>>()?;
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(&self.model)
+            .messages(request_messages)
+            .build()?;
+        Ok(request)
+    }
 }
 
 fn convert_prompt(
