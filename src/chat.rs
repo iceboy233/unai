@@ -20,8 +20,6 @@ pub struct Chat {
     writer: BufWriter<Stdout>,
     prompt_you: String,
     prompt_ai: String,
-    tx: mpsc::Sender<UserMessage>,
-    rx: mpsc::Receiver<AssistantMessage>,
 }
 
 enum Line {
@@ -31,7 +29,7 @@ enum Line {
 }
 
 impl Chat {
-    pub fn new(tx: mpsc::Sender<UserMessage>, rx: mpsc::Receiver<AssistantMessage>) -> Self {
+    pub fn new() -> Self {
         const STYLE_YOU: Style = Style::new()
             .fg_color(Some(Color::Ansi(AnsiColor::BrightBlue)))
             .bold();
@@ -54,12 +52,14 @@ impl Chat {
             writer,
             prompt_you,
             prompt_ai,
-            tx,
-            rx,
         }
     }
 
-    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(
+        mut self,
+        tx: mpsc::Sender<UserMessage>,
+        mut rx: mpsc::Receiver<AssistantMessage>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             self.writer.write_all(self.prompt_you.as_bytes()).await?;
             self.writer.flush().await?;
@@ -77,17 +77,15 @@ impl Chat {
                 }
             };
 
-            self.tx
-                .send(UserMessage {
-                    session: SessionId(Platform::Local, 0),
-                    user: User::default(),
-                    content: Content::Text(message),
-                    should_reply: true,
-                })
-                .await?;
+            tx.send(UserMessage {
+                session: SessionId(Platform::Local, 0),
+                user: User::default(),
+                content: Content::Text(message),
+                should_reply: true,
+            })
+            .await?;
 
-            let message = self
-                .rx
+            let message = rx
                 .recv()
                 .await
                 .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?;

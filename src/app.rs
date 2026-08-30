@@ -6,7 +6,7 @@ use crate::{
     ai,
     chat::Chat,
     config::Config,
-    telegram,
+    telegram::TelegramBot,
     types::{AssistantMessage, Content, Platform, SessionId, User, UserMessage},
 };
 
@@ -36,7 +36,7 @@ impl App {
 
         select! {
             result = self.run_ai(assistant_tx, user_rx) => result,
-            result = Chat::new(user_tx, assistant_rx).run() => result,
+            result = Chat::new().run(user_tx, assistant_rx) => result,
         }
     }
 
@@ -101,6 +101,7 @@ impl App {
             io::Error::new(io::ErrorKind::InvalidInput, "missing telegram config")
         })?;
 
-        telegram::run_bot(&telegram_config.bot_token, tx, rx).await
+        let bot = TelegramBot::connect(&telegram_config.bot_token).await?;
+        bot.run(tx, rx).await
     }
 }
