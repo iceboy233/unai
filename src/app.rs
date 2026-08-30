@@ -3,7 +3,8 @@ use std::io;
 use tokio::{select, sync::mpsc};
 
 use crate::{
-    ai, chat,
+    ai,
+    chat::Chat,
     config::Config,
     telegram,
     types::{AssistantMessage, Content, Platform, SessionId, User, UserMessage},
@@ -35,7 +36,7 @@ impl App {
 
         select! {
             result = self.run_ai(assistant_tx, user_rx) => result,
-            result = chat::run(user_tx, assistant_rx) => result,
+            result = Chat::new(user_tx, assistant_rx).run() => result,
         }
     }
 
