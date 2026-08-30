@@ -9,6 +9,7 @@ use frankenstein::{
 };
 use log::{debug, error, info, warn};
 use serde_fmt::to_debug;
+use telegram_markdown_v2::UnsupportedTagsStrategy;
 use tokio::{select, sync::mpsc, time::sleep};
 
 use crate::types::{AssistantMessage, Content, Platform, SessionId, User, UserMessage};
@@ -128,7 +129,11 @@ impl TelegramBot {
     }
 
     async fn send_text(&self, chat_id: i64, text: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let params = match telegram_markdown_v2::convert(text) {
+        // TODO: use send_rich_message in a few years.
+        let params = match telegram_markdown_v2::convert_with_strategy(
+            text,
+            UnsupportedTagsStrategy::Escape,
+        ) {
             Ok(markdown) => SendMessageParams::builder()
                 .chat_id(chat_id)
                 .text(markdown)
