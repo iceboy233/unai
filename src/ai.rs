@@ -13,7 +13,7 @@ use log::{debug, info, warn};
 use serde_fmt::to_debug;
 use tokio::sync::mpsc;
 
-use crate::types::{AssistantMessage, Content, UserMessage};
+use crate::types::{AssistantMessage, AssistantRequest, Content, UserMessage};
 
 pub struct Assistant {
     client: Client<OpenAIConfig>,
@@ -43,26 +43,25 @@ impl Assistant {
 
     pub async fn run(
         &self,
-        tx: mpsc::Sender<AssistantMessage>,
-        mut rx: mpsc::Receiver<UserMessage>,
+        mut request_rx: mpsc::Receiver<AssistantRequest>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // TODO: Use persistent storage
         let mut sessions = HashMap::new();
 
-        while let Some(user_message) = rx.recv().await {
-            let messages: &mut Vec<Message> =
-                sessions.entry(user_message.session.clone()).or_default();
-            if !user_message.should_reply {
-                messages.push(Message::User(user_message));
+        while let Some(request) = request_rx.recv().await {
+            let session = &request.message.session;
+            let messages: &mut Vec<Message> = sessions.entry(session.clone()).or_default();
+            let Some(reply_tx) = request.reply_tx else {
+                messages.push(Message::User(request.message));
                 continue;
-            }
-            match self.handle_user_message(messages, &user_message).await {
-                Ok(assistant_message) => {
-                    tx.send(assistant_message.clone()).await?;
-                    messages.extend([
-                        Message::User(user_message),
-                        Message::Assistant(assistant_message),
-                    ]);
+            };
+
+            match self.handle_user_message(messages, &request.message).await {
+                Ok(message) => {
+                    if reply_tx.send(message.clone()).is_err() {
+                        warn!("Send reply failed");
+                    }
+                    messages.extend([Message::User(request.message), Message::Assistant(message)]);
                 }
                 Err(e) => warn!("Handle user message failed: {e:?}"),
             }

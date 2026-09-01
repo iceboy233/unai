@@ -1,9 +1,15 @@
+use tokio::sync::oneshot;
+
+pub struct AssistantRequest {
+    pub message: UserMessage,
+    pub reply_tx: Option<oneshot::Sender<AssistantMessage>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct UserMessage {
     pub session: SessionId,
     pub user: User,
     pub content: Content,
-    pub should_reply: bool,
     // TODO: time
 }
 

@@ -10,10 +10,10 @@ use tokio::{
     },
     select,
     signal::ctrl_c,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 
-use crate::types::{AssistantMessage, Content, Platform, SessionId, User, UserMessage};
+use crate::types::{AssistantRequest, Content, Platform, SessionId, User, UserMessage};
 
 pub struct Chat {
     lines: Lines<BufReader<Stdin>>,
@@ -57,15 +57,14 @@ impl Chat {
 
     pub async fn run(
         mut self,
-        tx: mpsc::Sender<UserMessage>,
-        mut rx: mpsc::Receiver<AssistantMessage>,
+        request_tx: mpsc::Sender<AssistantRequest>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             self.writer.write_all(self.prompt_you.as_bytes()).await?;
             self.writer.flush().await?;
 
-            let message = match self.read_line().await? {
-                Line::Message(message) => message,
+            let text = match self.read_line().await? {
+                Line::Message(text) => text,
                 Line::Retry => {
                     self.writer.write_all(b"\n").await?;
                     continue;
@@ -77,18 +76,26 @@ impl Chat {
                 }
             };
 
-            tx.send(UserMessage {
+            let message = UserMessage {
                 session: SessionId(Platform::Local, 0),
                 user: User::default(),
-                content: Content::Text(message),
-                should_reply: true,
-            })
-            .await?;
+                content: Content::Text(text),
+            };
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let request = AssistantRequest {
+                message,
+                reply_tx: Some(reply_tx),
+            };
+            request_tx.send(request).await?;
 
-            let message = rx
-                .recv()
-                .await
-                .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?;
+            let message = match reply_rx.await {
+                Ok(message) => message,
+                Err(_) => {
+                    self.writer.write_all(self.prompt_ai.as_bytes()).await?;
+                    self.writer.write_all(b"Request failed.\n").await?;
+                    continue;
+                }
+            };
             self.writer.write_all(self.prompt_ai.as_bytes()).await?;
             self.write_content(message.content).await?;
         }

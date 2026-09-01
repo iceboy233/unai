@@ -10,6 +10,7 @@ anstyle = "1"
 async-openai = { version = "0.41", features = ["chat-completion"] }
 bpaf = { version = "0.9", features = ["bpaf_derive"] }
 frankenstein = { version = "0.50", features = ["client-reqwest"] }
+futures-util = "0.3"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_fmt = "1"

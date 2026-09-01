@@ -11,21 +11,29 @@ use frankenstein::{
     updates::UpdateContent,
     AsyncTelegramApi, ParseMode,
 };
-use log::{debug, error, info, warn};
+use futures_util::{stream::FuturesUnordered, StreamExt};
+use log::{debug, info, warn};
 use serde_fmt::to_debug;
 use telegram_markdown_v2::UnsupportedTagsStrategy;
 use tokio::{
     select,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     time::{sleep, sleep_until, Instant},
 };
 
-use crate::types::{AssistantMessage, Content, Platform, SessionId, User, UserMessage};
+use crate::types::{
+    AssistantMessage, AssistantRequest, Content, Platform, SessionId, User, UserMessage,
+};
 
 pub struct TelegramBot {
     bot: Bot,
     bot_user_id: u64,
     bot_username: String,
+}
+
+struct PendingReply {
+    chat_id: i64,
+    reply_rx: oneshot::Receiver<AssistantMessage>,
 }
 
 impl TelegramBot {
@@ -47,20 +55,20 @@ impl TelegramBot {
 
     pub async fn run(
         self,
-        tx: mpsc::Sender<UserMessage>,
-        rx: mpsc::Receiver<AssistantMessage>,
+        request_tx: mpsc::Sender<AssistantRequest>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (typing_tx, typing_rx) = mpsc::channel(1);
+        let (pending_reply_tx, pending_reply_rx) = mpsc::channel(1);
+
         select! {
-            result = self.recv(tx, typing_tx) => result,
-            result = self.send(rx, typing_rx) => result,
+            result = self.recv(request_tx, pending_reply_tx) => result,
+            result = self.send(pending_reply_rx) => result,
         }
     }
 
     async fn recv(
         &self,
-        user_tx: mpsc::Sender<UserMessage>,
-        typing_tx: mpsc::Sender<i64>,
+        request_tx: mpsc::Sender<AssistantRequest>,
+        pending_reply_tx: mpsc::Sender<PendingReply>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut next_offset = None;
         loop {
@@ -80,24 +88,37 @@ impl TelegramBot {
 
             for update in updates {
                 next_offset = Some(update.update_id as i64 + 1);
-                let message = match update.content {
+                match update.content {
                     UpdateContent::Message(message) => {
-                        let Some(text) = &message.text else {
-                            warn!("Unsupported message: {:?}", to_debug(message.as_ref()));
+                        let update_message = message.as_ref();
+                        let Some(text) = &update_message.text else {
+                            warn!("Unsupported message: {:?}", to_debug(update_message));
                             continue;
                         };
-                        debug!("Received text message: {:?}", to_debug(message.as_ref()));
+                        debug!("Received text message: {:?}", to_debug(update_message));
 
-                        let session = SessionId(Platform::Telegram, message.chat.id);
-                        let user = get_user(message.as_ref());
+                        let session = SessionId(Platform::Telegram, update_message.chat.id);
+                        let user = get_user(update_message);
                         let content = Content::Text(text.clone());
-                        let should_reply = self.should_reply(message.as_ref());
-
-                        UserMessage {
+                        let message = UserMessage {
                             session,
                             user,
                             content,
-                            should_reply,
+                        };
+
+                        let (reply_tx, reply_rx) = self
+                            .should_reply(update_message)
+                            .then(oneshot::channel)
+                            .map_or_default(|(reply_tx, reply_rx)| {
+                                (Some(reply_tx), Some(reply_rx))
+                            });
+                        request_tx
+                            .send(AssistantRequest { message, reply_tx })
+                            .await?;
+                        if let Some(reply_rx) = reply_rx {
+                            let chat_id = update_message.chat.id;
+                            let pending_reply = PendingReply { chat_id, reply_rx };
+                            pending_reply_tx.send(pending_reply).await?;
                         }
                     }
                     content => {
@@ -105,59 +126,47 @@ impl TelegramBot {
                         continue;
                     }
                 };
-                if message.should_reply {
-                    typing_tx.send(message.session.1).await?;
-                }
-                user_tx.send(message).await?;
             }
         }
     }
 
     async fn send(
         &self,
-        mut assistant_rx: mpsc::Receiver<AssistantMessage>,
-        mut typing_rx: mpsc::Receiver<i64>,
+        mut pending_reply_rx: mpsc::Receiver<PendingReply>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut reply_futures = FuturesUnordered::new();
         let mut typing_count: HashMap<i64, usize> = HashMap::new();
         let mut typing_queue: VecDeque<(i64, Instant)> = VecDeque::new();
 
         loop {
             select! {
-                message = assistant_rx.recv() => {
-                    match message {
-                        Some(message) => {
-                            let session = message.session;
-                            if session.0 != Platform::Telegram {
-                                error!("Received mismatched platform: {:?}", session.0);
-                                continue;
-                            }
+                Some(pending_reply) = pending_reply_rx.recv() => {
+                    let chat_id = pending_reply.chat_id;
+                    let count = typing_count.entry(chat_id).or_default();
+                    *count += 1;
+                    if *count == 1 {
+                        typing_queue.push_front((chat_id, Instant::now()));
+                    }
+                    reply_futures.push(async move { (chat_id, pending_reply.reply_rx.await) });
+                }
+                Some((chat_id, result)) = reply_futures.next(), if !reply_futures.is_empty() => {
+                    match result {
+                        Ok(message) => {
                             match message.content {
                                 Content::Text(text) => {
-                                    if let Err(e) = self.send_text(session.1, &text).await {
+                                    if let Err(e) = self.send_text(chat_id, &text).await {
                                         warn!("Send text failed: {e:?}");
                                     }
                                 }
                             }
-                            if let hash_map::Entry::Occupied(mut entry) = typing_count.entry(session.1) {
-                                *entry.get_mut() -= 1;
-                                if *entry.get() == 0 {
-                                    entry.remove();
-                                }
-                            }
                         }
-                        None => return Ok(()),
+                        Err(_) => warn!("Request failed for chat {chat_id}"),
                     }
-                }
-                chat_id = typing_rx.recv() => {
-                    match chat_id {
-                        Some(chat_id) => {
-                            let count = typing_count.entry(chat_id).or_default();
-                            *count += 1;
-                            if *count == 1 {
-                                typing_queue.push_front((chat_id, Instant::now()));
-                            }
+                    if let hash_map::Entry::Occupied(mut entry) = typing_count.entry(chat_id) {
+                        *entry.get_mut() -= 1;
+                        if *entry.get() == 0 {
+                            entry.remove();
                         }
-                        None => return Ok(()),
                     }
                 }
                 _ = sleep_until_or_pending(typing_queue.front().map(|(_, deadline)| deadline).copied()) => {
@@ -180,6 +189,7 @@ impl TelegramBot {
                         typing_queue.push_back((chat_id, now + Duration::from_secs(4)));
                     }
                 }
+                else => return Ok(()),
             }
         }
     }

@@ -1992,6 +1992,7 @@ dependencies = [
  "async-openai",
  "bpaf",
  "frankenstein",
+ "futures-util",
  "log",
  "serde",
  "serde_fmt",
